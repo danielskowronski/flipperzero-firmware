@@ -96,64 +96,17 @@ const SubGhzProtocol ws_protocol_Meteo_SP68 = {
     .encoder = &ws_protocol_Meteo_SP68_encoder,
 };
 
-int log_ptr;
-char* log_state;
-char* log_action;
-long* log_time;
-#define LOG_LENGTH 256
-
-void alloc_log() {
-    log_state = (char*)aligned_malloc(LOG_LENGTH * sizeof(char), 1);
-    log_action = (char*)aligned_malloc(LOG_LENGTH * sizeof(char), 1);
-    log_time = (long*)aligned_malloc(LOG_LENGTH * sizeof(char), 1);
-}
-void free_log() {
-  log_ptr = 0;
-  aligned_free(log_state);
-  aligned_free(log_action);
-  aligned_free(log_time);
-}
-void clear_log() {
-  log_ptr = 0;
-
-}
-void append_log(char state, char action, long time){
-  if(log_ptr >= LOG_LENGTH-1) {
-      FURI_LOG_E(TAG, "LOG OVERFLOW");
-      return;
-  }
-
-  log_state[log_ptr] = state;
-  log_action[log_ptr] = action;
-  log_time[log_ptr] = time;
-
-  log_ptr++;
-}
-void print_log(){
-  return;
-  if (log_ptr<20) return;
-  FURI_LOG_E(TAG, "========================================================================");
-  for (int i=0; i<log_ptr; i++) {
-    if(log_time[i] > 999999) 
-      FURI_LOG_E(TAG, "State: %c Time: >1 SEC Action: %c", log_state[i], log_action[i]);
-    else
-      FURI_LOG_E(
-          TAG, "State: %c Time: % 6ld Action: %c", log_state[i], log_time[i], log_action[i]);
-  }
-}
-
 void* ws_protocol_decoder_Meteo_SP68_alloc(SubGhzEnvironment* environment) {
     UNUSED(environment);
     WSProtocolDecoderMeteo_SP68* instance = malloc(sizeof(WSProtocolDecoderMeteo_SP68));
     instance->base.protocol = &ws_protocol_Meteo_SP68;
     instance->generic.protocol_name = instance->base.protocol->name;
-    alloc_log(); return instance;
+    return instance;
 }
 
 void ws_protocol_decoder_Meteo_SP68_free(void* context) {
     furi_assert(context);
     WSProtocolDecoderMeteo_SP68* instance = context;
-    free_log();
     free(instance);
 }
 
@@ -164,9 +117,11 @@ void ws_protocol_decoder_Meteo_SP68_reset(void* context) {
 }
 
 static bool ws_protocol_Meteo_SP68_check(WSProtocolDecoderMeteo_SP68* instance) {
-    FURI_LOG_E(TAG, "%02d 0x%llx", instance->decode_count_bit, instance->decoder.decode_data);
-    if(instance->decode_count_bit!=42) {
-        return false;
+    if(instance->decoder.decode_count_bit != 42) {
+      return false;
+    }
+    if(((instance->decoder.decode_data >> 23) & 0x7F) > 100) {
+      return false;
     }
     return true;
 }
@@ -179,8 +134,13 @@ static void ws_protocol_Meteo_SP68_remote_controller(WSBlockGeneric* instance) {
     instance->id = (instance->data >> 31);
     instance->battery_low = ((instance->data >> 21) & 1);
     instance->channel = ((instance->data >> 19) & 0x7) + 1;
-    instance->temp = (float)((instance->data >> 7) & 0x07FF) / 10.0f; // TODO: check negative temperatures
+    instance->temp = (float)(int)((instance->data >> 7) & 0x07FF) / 10.0f; 
     instance->humidity = (instance->data >> 23) & 0x7F;
+
+    // sign bit on 1st LSB in 12-bit integer but we don't have such type here so keeping this workaround
+    if (instance->temp >= 102.4) { 
+      instance->temp -= 204.8;
+    }
 }
 
 
@@ -191,17 +151,11 @@ void ws_protocol_decoder_Meteo_SP68_feed(void* context, bool level, uint32_t u_d
 
     // HIGH
     if (level) {
-        if(duration >
-           ws_protocol_Meteo_SP68_const.te_long + ws_protocol_Meteo_SP68_const.te_delta) {
-            append_log('H', 'R', duration);
-
-            print_log();
-            clear_log();
+        if(duration > ws_protocol_Meteo_SP68_const.te_long + ws_protocol_Meteo_SP68_const.te_delta) {
             instance->decoder.decode_data = 0;
             instance->decoder.decode_count_bit = 0;
         }
         else {
-            append_log('H', 'P', duration);
         }
     }
 
@@ -211,9 +165,7 @@ void ws_protocol_decoder_Meteo_SP68_feed(void* context, bool level, uint32_t u_d
         if((duration >=
             ws_protocol_Meteo_SP68_const.te_short - ws_protocol_Meteo_SP68_const.te_delta) &&
            (duration <=
-            ws_protocol_Meteo_SP68_const.te_short + ws_protocol_Meteo_SP68_const.te_delta)) {
-            append_log('L', '1', duration);
-  
+            ws_protocol_Meteo_SP68_const.te_short + ws_protocol_Meteo_SP68_const.te_delta)) {  
             subghz_protocol_blocks_add_bit(&instance->decoder, 1);
         }
 
@@ -223,20 +175,13 @@ void ws_protocol_decoder_Meteo_SP68_feed(void* context, bool level, uint32_t u_d
              ws_protocol_Meteo_SP68_const.te_long - ws_protocol_Meteo_SP68_const.te_delta * 2) &&
             (duration <=
              ws_protocol_Meteo_SP68_const.te_long + ws_protocol_Meteo_SP68_const.te_delta * 2)) {
-
-            append_log('L', '0', duration);
-
             subghz_protocol_blocks_add_bit(&instance->decoder, 0);
         }
 
         // LOW for nonstandard time - reset
         else {
-            append_log('L', 'R', duration);
-
-            print_log();
             instance->decoder.decode_data = 0;
             instance->decoder.decode_count_bit = 0;
-            clear_log();
         }
     }
 
@@ -245,8 +190,6 @@ void ws_protocol_decoder_Meteo_SP68_feed(void* context, bool level, uint32_t u_d
       instance->generic.data = instance->decoder.decode_data;
       instance->generic.data_count_bit = instance->decoder.decode_count_bit;
       ws_protocol_Meteo_SP68_remote_controller(&instance->generic);
-      append_log('D', 'F', duration);
-
       if(instance->base.callback)
           instance->base.callback(&instance->base, instance->base.context);
     }
@@ -265,7 +208,6 @@ SubGhzProtocolStatus ws_protocol_decoder_Meteo_SP68_serialize(
     SubGhzRadioPreset* preset) {
     furi_assert(context);
     WSProtocolDecoderMeteo_SP68* instance = context;
-    FURI_LOG_E(TAG, "ws_protocol_decoder_Meteo_SP68_serialize");
     return ws_block_generic_serialize(&instance->generic, flipper_format, preset);
 }
 
@@ -274,7 +216,6 @@ SubGhzProtocolStatus
     furi_assert(context);
     WSProtocolDecoderMeteo_SP68* instance = context;
 
-    FURI_LOG_E(TAG, "ws_protocol_decoder_Meteo_SP68_deserialize");
     return ws_block_generic_deserialize_check_count_bit(
         &instance->generic, flipper_format, ws_protocol_Meteo_SP68_const.min_count_bit_for_found);
 }
